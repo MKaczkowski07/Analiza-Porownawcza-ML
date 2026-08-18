@@ -1,114 +1,88 @@
-import numpy as np
 import pandas as pd
+import numpy as np
 import sys
 import os
-import warnings
-
-from sklearn.model_selection import GridSearchCV
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 
-warnings.filterwarnings('ignore')
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from neural_networks.data_preprocessing_cls import TitanicPreprocessing
 
 
-def tune_and_test_model(model_class, param_grid, train_path):
-    print(f"\n{'=' * 85}")
-    print(f"Optymalizacja hiperparametrów: {model_class.__name__}")
-    print(f"{'=' * 85}")
+def run_parameter_analysis(model_class, param_name, values, X_train, y_train, X_test, y_test, **defaults):
+    results = []
+    print(f"Analiza parametru: {param_name} dla {model_class.__name__}")
 
+    for val in values:
+        params = defaults.copy()
+        params[param_name] = val
+        model = model_class(**params)
+
+        model.fit(X_train, y_train)
+        train_acc = model.score(X_train, y_train) * 100
+        test_acc = model.score(X_test, y_test) * 100
+        diff = train_acc - test_acc
+
+        results.append({
+            'Wartość': val,
+            'Dokładność Uczący (%)': round(train_acc, 2),
+            'Dokładność Testowy (%)': round(test_acc, 2),
+            'Różnica (p.p.)': round(diff, 2)
+        })
+
+    df = pd.DataFrame(results)
+    print(df.to_string(index=False))
+    print("-" * 50)
+    return df
+
+
+def main():
+    train_path = '../../data/titanic/train.csv'
     preprocessor = TitanicPreprocessing(data_path=train_path)
     X_train_nn, X_test_nn, y_train_nn, y_test_nn = preprocessor.get_processed_data(test_size=0.2)
 
     X_train, X_test = X_train_nn.T, X_test_nn.T
     y_train, y_test = y_train_nn.T.ravel(), y_test_nn.T.ravel()
 
-    base_model = model_class()
+    # --- 1. K-Najbliższych Sąsiadów ---
+    knn_defaults = {'n_neighbors': 5, 'p': 2, 'leaf_size': 30}
+    run_parameter_analysis(KNeighborsClassifier, 'n_neighbors', [3, 5, 10, 20], X_train, y_train, X_test, y_test,
+                           **knn_defaults)
+    run_parameter_analysis(KNeighborsClassifier, 'p', [1, 2, 3, 5], X_train, y_train, X_test, y_test, **knn_defaults)
+    run_parameter_analysis(KNeighborsClassifier, 'leaf_size', [10, 20, 30, 50], X_train, y_train, X_test, y_test,
+                           **knn_defaults)
 
-    grid_search = GridSearchCV(
-        estimator=base_model,
-        param_grid=param_grid,
-        cv=5,
-        scoring='accuracy',
-        n_jobs=-3,
-        return_train_score = True
-    )
+    # --- 2. Drzewo Decyzyjne ---
+    tree_defaults = {'random_state': 42}
+    run_parameter_analysis(DecisionTreeClassifier, 'max_depth', [3, 5, 10, None], X_train, y_train, X_test, y_test,
+                           **tree_defaults)
 
-    print("Przeszukiwanie siatki. Trenowanie i weryfikacja wszystkich kombinacji...\n")
+    tree_defaults_with_limit = {'random_state': 42, 'max_depth': 10}
+    run_parameter_analysis(DecisionTreeClassifier, 'min_samples_split', [2, 5, 10, 20], X_train, y_train, X_test,
+                           y_test, **tree_defaults_with_limit)
+    run_parameter_analysis(DecisionTreeClassifier, 'min_samples_leaf', [1, 2, 4, 8], X_train, y_train, X_test, y_test,
+                           **tree_defaults_with_limit)
 
-    grid_search.fit(X_train, y_train)
+    # --- 3. Las Losowy ---
+    rf_defaults = {'n_estimators': 100, 'random_state': 42}
+    run_parameter_analysis(RandomForestClassifier, 'n_estimators', [10, 50, 100, 200], X_train, y_train, X_test, y_test,
+                           **rf_defaults)
+    run_parameter_analysis(RandomForestClassifier, 'max_depth', [5, 10, 20, None], X_train, y_train, X_test, y_test,
+                           **rf_defaults)
 
-    results_df = pd.DataFrame(grid_search.cv_results_)
-    params_cols = [col for col in results_df.columns if col.startswith('param_')]
-    cols_to_show = params_cols + ['mean_train_score', 'mean_test_score', 'rank_test_score']
+    rf_defaults_with_limit = {'n_estimators': 100, 'max_depth': 20, 'random_state': 42}
+    run_parameter_analysis(RandomForestClassifier, 'min_samples_split', [2, 5, 10, 20], X_train, y_train, X_test,
+                           y_test, **rf_defaults_with_limit)
 
-    top_results = results_df[cols_to_show].sort_values(by='rank_test_score').head(5).copy()
-
-    top_results['mean_train_score'] = round(top_results['mean_train_score'] * 100, 2)
-    top_results['mean_test_score'] = round(top_results['mean_test_score'] * 100, 2)
-
-    top_results['Przeuczenie (%)'] = round(top_results['mean_train_score'] - top_results['mean_test_score'], 2)
-
-    rename_dict = {
-        'mean_train_score': 'Uczący (%)',
-        'mean_test_score': 'Walidacja (%)',
-        'rank_test_score': 'Miejsce'
-    }
-    for col in params_cols:
-        rename_dict[col] = col.replace('param_', '')
-
-    top_results.rename(columns=rename_dict, inplace=True)
-
-    kolumny = list(top_results.columns)
-    kolumny.remove('Miejsce')
-    kolumny.append('Miejsce')
-    top_results = top_results[kolumny]
-
-    print(f"--- 5 NAJLEPSZYCH KOMBINACJI ({model_class.__name__}) ---")
-    print(top_results.to_string(index=False))
-    print("-" * 85 + "\n")
-
-
-def main():
-    train_path = '../../data/titanic/train.csv'
-    print("Rozpoczynam zautomatyzowane strojenie algorytmów...")
-
-    # 1. Siatka dla KNN
-    knn_grid = {
-        'n_neighbors': [3, 5, 7, 10, 15],
-        'weights': ['uniform', 'distance'],
-        'p': [1, 2]
-    }
-    tune_and_test_model(KNeighborsClassifier, knn_grid, train_path)
-
-    # 2. Siatka dla Drzewa Decyzyjnego
-    tree_grid = {
-        'max_depth': [3, 5, 10, 15, None],
-        'min_samples_split': [2, 5, 10],
-        'criterion': ['gini', 'entropy']
-    }
-    tune_and_test_model(DecisionTreeClassifier, tree_grid, train_path)
-
-    # 3. Siatka dla Lasu Losowego
-    rf_grid = {
-        'n_estimators': [50, 100, 200],
-        'max_depth': [5, 10, None],
-        'min_samples_split': [2, 5]
-    }
-    tune_and_test_model(RandomForestClassifier, rf_grid, train_path)
-
-    # 4. Siatka dla SVC
-    svc_grid = {
-        'kernel': ['linear', 'rbf'],
-        'C': [0.1, 1, 10],
-        'gamma': ['scale', 'auto']
-    }
-    tune_and_test_model(SVC, svc_grid, train_path)
-
+    # --- 4. SVC ---
+    svc_defaults = {'kernel': 'rbf', 'C': 1.0,
+                    'random_state': 42}
+    run_parameter_analysis(SVC, 'kernel', ['linear', 'poly', 'rbf', 'sigmoid'], X_train, y_train, X_test, y_test,
+                           **svc_defaults)
+    run_parameter_analysis(SVC, 'C', [0.1, 1.0, 10.0, 100.0], X_train, y_train, X_test, y_test, **svc_defaults)
+    run_parameter_analysis(SVC, 'gamma', ['scale', 'auto', 0.1, 1.0], X_train, y_train, X_test, y_test, **svc_defaults)
 
 if __name__ == "__main__":
     main()
